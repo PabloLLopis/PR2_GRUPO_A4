@@ -1,9 +1,9 @@
-from robodk import robolink    # RoboDK API
-from robodk import robomath    # Robot toolbox
-import threading
-import time
-import paho.mqtt.client as mqtt
-RDK = robolink.Robolink()
+from robodk import robolink     # RoboDK API
+from robodk import robomath     # Robot toolbox
+import threading                #Libreria de hilos
+import time                     #Libreria de para usar sleeps
+import paho.mqtt.client as mqtt #Libreria para la conexion con mqtt
+RDK = robolink.Robolink()       #Conexión con RoboDK
 
 
 INCREMENTO_TAPA = 330
@@ -41,9 +41,8 @@ target_inicio1 = RDK.Item('Inicio1', robolink.ITEM_TYPE_TARGET)
 target_inicio2 = RDK.Item('Inicio2', robolink.ITEM_TYPE_TARGET)
 target_final2 = RDK.Item('Final2', robolink.ITEM_TYPE_TARGET)
 
-evento_iniciar = threading.Event()
-evento_terminado = threading.Event()    
-lock = threading.Lock()
+sensor_esp_activado = False
+estacion_pausada = False
 lista = [tarta]
 lista2 = [tapa6, tapa5, tapa4, tapa3, tapa2, tapa1]
 detectado = False
@@ -56,6 +55,9 @@ i = 0
 j = 0
 x = 1
 
+evento_iniciar = threading.Event()
+evento_terminado = threading.Event()    
+lock = threading.Lock()     
 def mover_robot(nombre_proceso):
     RDK_hilo = robolink.Robolink()
     while True:
@@ -73,28 +75,77 @@ def mover_robot(nombre_proceso):
 hilo_robot = threading.Thread(target=mover_robot, args=("Topping",))
 hilo_robot.start()
 
-# --- CONFIGURACIÓN ---
-broker_address = "mqtt.dsic.upv.es"
+def on_message(client, userdata, msg):
+    global sensor_esp_activado, estacion_pausada
+    payload = msg.payload.decode("utf-8")
+    
+    # 1. Comportamiento del Botón (Interrupción inmediata)
+    if payload == "EMERGENCY":
+        with lock:
+            if not estacion_pausada:
+                RDK_btn = robolink.Robolink()
+                RDK_btn.setSimulationSpeed(0)
+                estacion_pausada = True
+            else:
+                # Si volvemos a recibir EMERGENCY estando pausados, actuamos como EMERGENCY_OFF
+                RDK_btn = robolink.Robolink()
+                RDK_btn.setSimulationSpeed(5)
+                estacion_pausada = False
+
+    elif payload == "EMERGENCY_OFF":
+        with lock:
+            if estacion_pausada:
+                print("[SISTEMA] Señal de rearme recibida. Reanudando estación...\n")
+                RDK_btn = robolink.Robolink()
+                RDK_btn.setSimulationSpeed(5)
+                estacion_pausada = False
+        
+    # 2. Comportamiento del Nuevo Sensor (Actualiza la bandera)
+    elif payload == "EMPTY":
+        with lock:
+            sensor_esp_activado = True
+
+# --- CONFIGURACIÓN --- 
+broker_address = "broker.emqx.io"
 port = 1883
-user = "giirob"
-password = "UPV2024"
+password = "joseba00"
 topic = "giirob/pr2/estacion/leds"
+#user = "Iphone Joseba"
+
 
 client = mqtt.Client()
-client.username_pw_set(user, password)
 client.connect(broker_address, 1883, 60)
+client.subscribe(topic)
+client.on_message = on_message
 client.loop_start()
+time.sleep(1)
+
+
 
 def enviar_mensaje(cliente, mensaje):
     resultado = cliente.publish(topic, mensaje)
-    resultado.wait_for_publish() 
+    resultado.wait_for_publish()
 
+enviar_mensaje(client, "READY")
+time.sleep(2.0)
+enviar_mensaje(client, "READY_OFF")
 
 while True:
-    enviar_mensaje(client, "READY")
     if j == 4 * x:
+
         enviar_mensaje(client, "FULL")
-        time.sleep(5.0)
+
+        with lock:
+            sensor_esp_activado = False
+            
+        # Espera activa del sensor
+        esperando_sensor = True
+        while esperando_sensor:
+            with lock:
+                if sensor_esp_activado:
+                    esperando_sensor = False 
+            robomath.pause(0.1)
+
         lista3[j - 1].setVisible(False)
         lista3[j - 2].setVisible(False)
         lista3[j - 3].setVisible(False)
